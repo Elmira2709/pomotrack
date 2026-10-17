@@ -1,14 +1,10 @@
+from datetime import datetime
 from typing import Annotated
 from enum import Enum
 
 from fastapi import FastAPI, Query, HTTPException, status, Path, Depends
-from pydantic import BaseModel, Field
-from sqlmodel import Session, SQLModel, create_engine, select
-
-# БД---------------------
-class TableCategory(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    name: str = Field(index=True, unique=True)
+from pydantic import BaseModel, Field, NaiveDatetime
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 sqlite_file_name = "database.db"
 sqlite_url = f"sqlite:///{sqlite_file_name}"
@@ -23,19 +19,43 @@ def get_session():
     with Session(engine) as session:
         yield session
 
-SessionDep = Annotated[Session, Depends(get_session)] # канал связи с базой      
+SessionDep = Annotated[Session, Depends(get_session)] # канал связи с базой
+
 # БД---------------------
 
-class TaskBase(BaseModel):
-    title: str = Field(min_length=1, max_length=100) # описывает атрибут класса-модели (наследника BaseModel).
-    done: bool
-    category: int = Field(gt=0) 
+class CategoryBase(SQLModel):
+    name: str = Field(index=True, unique=True, min_length=1, max_length=50)
+
+class Category(CategoryBase, table=True):
+    id: int | None = Field(default=None, primary_key=True) # None означает ещё не присвоен
+
+class CategoryPublic(CategoryBase):
+    id: int
+
+class CategoryCreate(CategoryBase):
+    pass    
+      
+# БД---------------------
+
+class TaskBase(SQLModel):
+    title: str = Field(index=True, unique=True, min_length=1, max_length=100) # описывает атрибут класса-модели (наследника SQLModel).
+    done: bool | None = None 
+    category_id: int | None = Field(default=None, gt=0)
+
+class Task(TaskBase, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    category_id: int | None = Field(default=None, gt=0, foreign_key="category.id")
+    created_at: NaiveDatetime = Field(default_factory=lambda: datetime.now()) # вызывает её при каждом создании задачи, 
+    # и каждый раз получается новое время
 
 class TaskCreate(TaskBase):
     pass
 
-class Task(TaskBase):
+class TaskPublic(TaskBase):
     id: int
+
+class TaskUpdate(TaskBase):
+    title: str | None = Field(default=None, min_length=1, max_length=100) 
 
 class OrderBy(str, Enum):
     id = "id"
@@ -43,24 +63,11 @@ class OrderBy(str, Enum):
 
 class TaskFilters(BaseModel):
     done: bool | None = None
-    category: int | None = Field(default=None, gt=0)
+    category_id: int | None = Field(default=None, gt=0)
     search: str | None = Field(default=None, min_length=1, max_length=50)
-    order_by: OrderBy = OrderBy.id    
-
-class TaskUpdate(BaseModel):
-    title: str | None = Field(default=None, min_length=1, max_length=100)
-    done: bool | None = None
-    category: int | None = Field(default=None, gt=0)
-
-
-class CategoryBase(BaseModel):
-    name: str = Field(min_length=1, max_length=50)
-
-class CategoryCreate(CategoryBase):
-    pass
-
-class Category(CategoryBase):
-    id: int  
+    order_by: OrderBy = OrderBy.id  
+    skip: Annotated[int, Query(ge=0)] = 0 
+    limit: Annotated[int, Query(ge=1, le=100)] = 10  
 
 
 app = FastAPI()
@@ -70,128 +77,111 @@ def on_startup():
     create_db_and_tables()  
 
 
-tasks = [
-    Task(id=1, title="Do homework", done=True, category=1),
-    Task(id=2, title="Do exersice", done=False, category=1),
-    Task(id=3, title="Learn English", done=True, category=2)
-]
-
 TaskID = Annotated[int, Path(gt=0)]
 CategoryID = Annotated[int, Path(gt=0)]
 
-def category_found(category_id: CategoryID, session: SessionDep):
-    res = session.get(TableCategory, category_id)
+def category_found(id: CategoryID, session: SessionDep):
+    res = session.get(Category, id)
     if res:
         return res
     raise HTTPException(status_code=404, detail="Category not found") 
         
+CategoryDep = Annotated[Category, Depends(category_found)] # зависимость
 
-Category_for_loop = Annotated[TableCategory, Depends(category_found)] # зависимость
-
-def for_loop(task_id: TaskID):
-    for i in tasks:
-        if i.id == task_id:
-            return i
+def task_found(task_id: TaskID, session: SessionDep):
+    res = session.get(Task, task_id)
+    if res:
+        return res
     raise HTTPException(status_code=404, detail="Task not found")
 
-Task_for_loop = Annotated[Task, Depends(for_loop)]
+TaskDep = Annotated[Task, Depends(task_found)]
 
-class CommonParameters:
-    def __init__(self, skip: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100)] = 10):
-        self.skip = skip   
-        self.limit = limit
 
-Commons = Annotated[CommonParameters, Depends()] # работает только когда слева стоит класс, если слева функция то пишем тип
 
-@app.get("/tasks", response_model=list[Task])
-async def get_list(commons: Commons, filters: Annotated[TaskFilters, Query()]):
-    result = tasks.copy()
+#------------------------------------------------------
+@app.get("/tasks", response_model=list[TaskPublic])
+def get_list(filters: Annotated[TaskFilters, Query()], session: SessionDep):
+    query = select(Task)
     if filters.done is not None:
-        new = []
-        for i in result:
-            if i.done == filters.done:
-                new.append(i)
-        result = new
-    if filters.category is not None:
-        new = []
-        for j in result:
-            if j.category == filters.category:
-                new.append(j)
-        result = new
+        query = query.where(filters.done == Task.done)   
+    if filters.category_id is not None:
+        query = query.where(filters.category_id == Task.category_id)
     if filters.search is not None:
-        new = []
-        for k in result:
-            if filters.search.lower() in k.title.lower():
-                new.append(k)
-        result = new
-    result.sort(key=lambda x: getattr(x, filters.order_by.value.lower()))            
-    return result[commons.skip:commons.skip + commons.limit]                        
+        query = query.where(Task.title.ilike(f"%{filters.search}%"))
+    query = query.order_by(getattr(Task, filters.order_by.value.lower()))           
+    result = session.exec(query.offset(filters.skip).limit(filters.limit)).all() 
+    return result                        
  
-@app.post("/tasks", response_model=Task, status_code=201)
+@app.post("/tasks", response_model=TaskPublic, status_code=201)
 def create_task(task: TaskCreate, session: SessionDep):
-    category_found(task.category, session)
-    task_id = max((i.id for i in tasks), default=0) + 1    
-    new = Task(id=task_id, title=task.title, done=task.done, category=task.category)
-    tasks.append(new)
-    return new 
+    category_found(task.category_id, session)
+    db_task = Task.model_validate(task)   
+    session.add(db_task)  # запомни - надо бдет сохранить объект
+    session.commit() # уже записывает
+    session.refresh(db_task) # перечитывает
+    return db_task 
 
 
-@app.get("/tasks/{task_id}", response_model=Task) 
-async def get_task(task_new: Task_for_loop):
-    return task_new
+@app.get("/tasks/{task_id}", response_model=TaskPublic) 
+def get_task(task: TaskDep):
+    return task
 
-@app.put("/tasks/{task_id}", response_model=Task)
-def update_all_task(task_current: Task_for_loop, task: TaskCreate, session: SessionDep):
-    category_found(task.category, session)
-    num = tasks.index(task_current)
-    tasks[num] = Task(id=task_current.id, title=task.title, done=task.done, category=task.category)
-    return tasks[num]  
+@app.put("/tasks/{task_id}", response_model=TaskPublic)
+def update_all_task(task_current: TaskDep, task: TaskCreate, session: SessionDep):
+    if task.category_id is not None:
+        category_found(task.category_id, session)   
+    task_current.sqlmodel_update(task)
+    session.add(task_current)
+    session.commit() # уже записывает
+    session.refresh(task_current) # перечитывает
+    return task_current  
 
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def del_task(task_current: Task_for_loop):
-    tasks.remove(task_current)
+def del_task(task_current: TaskDep, session: SessionDep):
+    session.delete(task_current)
+    session.commit()
     return   
 
-@app.patch("/tasks/{task_id}", response_model=Task)
-def update_task(task_current: Task_for_loop, task: TaskUpdate, session: SessionDep):
-    if task.category is not None:
-        category_found(task.category, session)
-    update_data = task.model_dump(exclude_unset=True) # превращает в словарь только то, что прислал клиент
-    num = tasks.index(task_current)
-    update_t = task_current.model_copy(update=update_data)
-    tasks[num] = update_t  
-    return update_t      
+@app.patch("/tasks/{task_id}", response_model=TaskPublic)
+def update_task(task_current: TaskDep, task: TaskUpdate, session: SessionDep):
+    if task.category_id is not None:
+        category_found(task.category_id, session)
+    task_data = task.model_dump(exclude_unset=True)    
+    task_current.sqlmodel_update(task_data)
+    session.add(task_current)
+    session.commit()
+    session.refresh(task_current)
+    return task_current
+      
 
 # Категории----------------------------------------------
 
-@app.get("/categories", response_model=list[Category])
-def get_categories(commons: Commons, session: SessionDep): # синхронная
-    categories = session.exec(select(TableCategory).offset(commons.skip).limit(commons.limit)).all() # запрос к бд с лимитом, all нужен чтоб суметь превратить в список
+@app.get("/categories", response_model=list[CategoryPublic])
+def get_categories(session: SessionDep, skip: Annotated[int, Query(ge=0)] = 0, limit: Annotated[int, Query(ge=1, le=100)] = 10): # синхронная
+    categories = session.exec(select(Category).offset(skip).limit(limit)).all() # запрос к бд с лимитом, all нужен чтоб суметь превратить в список
     return categories
 
-@app.post("/categories", response_model=Category, status_code=201) # ПОТЕРЯ ВАЛИДАЦИИ
-def create_categorie(table_category: TableCategory, session: SessionDep): # сессия сиинхронная (id пока не проверяю)
-    res = session.exec(select(TableCategory).where(TableCategory.name == table_category.name)) #session.exec - "выполни этот запрос"
+@app.post("/categories", response_model=CategoryPublic, status_code=201)
+def create_categorie(category_create: CategoryCreate, session: SessionDep): # сессия сиинхронная (id пока не проверяю)
+    res = session.exec(select(Category).where(Category.name == category_create.name)) #session.exec - "выполни этот запрос"
     if res.first(): # отдай 1 строку запроса
         raise HTTPException(status_code=409, detail='Category already in categories table')    
-    session.add(table_category)  # запомни - надо бдет сохранить объект
+    db_category = Category.model_validate(category_create) # перекладывает уже проверенные данные из одной модели в другую
+    session.add(db_category)  # запомни - надо бдет сохранить объект
     session.commit() # уже записывает
-    session.refresh(table_category) # перечитывает
-    return table_category
+    session.refresh(db_category) # перечитывает
+    return db_category
 
 @app.get("/categories/{category_id}/tasks", response_model=list[Task])
-def get_task_by_category(categor_current: Category_for_loop):
-    res = []
-    for i in tasks:
-        if i.category == categor_current.id:
-            res.append(i)
+def get_task_by_category(categor_current: CategoryDep, session: SessionDep):
+    res = session.exec(select(Task).where(Task.category_id == categor_current.id)).all()
     return res
 
 @app.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)   
-def del_category(categor_current: Category_for_loop, session: SessionDep): 
-    for i in tasks:
-        if i.category == categor_current.id:
-            raise HTTPException(status_code=409, detail="You have task by this category")
+def del_category(categor_current: CategoryDep, session: SessionDep): 
+    q = session.exec(select(Task).where(Task.category_id == categor_current.id))
+    if q:
+        raise HTTPException(status_code=409, detail="You have task by this category")
     session.delete(categor_current)
     session.commit()
     return
