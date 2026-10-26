@@ -1,19 +1,12 @@
-from datetime import datetime
+from datetime import timezone, timedelta
 from typing import Annotated
-from enum import Enum
-
 from fastapi import FastAPI, Query, HTTPException, status, Path, Depends
-from pydantic import BaseModel, Field, NaiveDatetime
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlmodel import Session, SQLModel, create_engine, select
+from config import func
+from models import Category, CategoryPublic, CategoryCreate, TaskCreate, Task, TaskPublic, TaskUpdate, TaskFilters 
+from models import PomodoroSession, SesAnswer, SesCreate, SesFilters
 
-sqlite_file_name = "database.db"
-sqlite_url = f"sqlite:///{sqlite_file_name}"
-
-connect_args = {"check_same_thread": False}
-engine = create_engine(sqlite_url, connect_args=connect_args, echo=True)
-
-def create_db_and_tables():
-    SQLModel.metadata.create_all(engine)
+engine = create_engine(func().database_url, echo=True)
 
 def get_session():
     with Session(engine) as session:
@@ -23,65 +16,14 @@ SessionDep = Annotated[Session, Depends(get_session)] # канал связи с
 
 # БД---------------------
 
-class CategoryBase(SQLModel):
-    name: str = Field(index=True, unique=True, min_length=1, max_length=50)
-
-class Category(CategoryBase, table=True):
-    id: int | None = Field(default=None, primary_key=True) # None означает ещё не присвоен
-
-class CategoryPublic(CategoryBase):
-    id: int
-
-class CategoryCreate(CategoryBase):
-    pass    
-      
-# БД---------------------
-
-class TaskBase(SQLModel):
-    title: str = Field(index=True, unique=True, min_length=1, max_length=100) # описывает атрибут класса-модели (наследника SQLModel).
-    done: bool | None = None 
-    category_id: int | None = Field(default=None, gt=0)
-
-class Task(TaskBase, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    category_id: int | None = Field(default=None, gt=0, foreign_key="category.id")
-    created_at: NaiveDatetime = Field(default_factory=lambda: datetime.now()) # вызывает её при каждом создании задачи, 
-    # и каждый раз получается новое время
-
-class TaskCreate(TaskBase):
-    pass
-
-class TaskPublic(TaskBase):
-    id: int
-
-class TaskUpdate(TaskBase):
-    title: str | None = Field(default=None, min_length=1, max_length=100) 
-
-class OrderBy(str, Enum):
-    id = "id"
-    title = "title"    
-
-class TaskFilters(BaseModel):
-    done: bool | None = None
-    category_id: int | None = Field(default=None, gt=0)
-    search: str | None = Field(default=None, min_length=1, max_length=50)
-    order_by: OrderBy = OrderBy.id  
-    skip: Annotated[int, Query(ge=0)] = 0 
-    limit: Annotated[int, Query(ge=1, le=100)] = 10  
-
-
 app = FastAPI()
-
-@app.on_event("startup")
-def on_startup():
-    create_db_and_tables()  
 
 
 TaskID = Annotated[int, Path(gt=0)]
 CategoryID = Annotated[int, Path(gt=0)]
 
-def category_found(id: CategoryID, session: SessionDep):
-    res = session.get(Category, id)
+def category_found(category_id: CategoryID, session: SessionDep):
+    res = session.get(Category, category_id)
     if res:
         return res
     raise HTTPException(status_code=404, detail="Category not found") 
@@ -179,9 +121,50 @@ def get_task_by_category(categor_current: CategoryDep, session: SessionDep):
 
 @app.delete("/categories/{category_id}", status_code=status.HTTP_204_NO_CONTENT)   
 def del_category(categor_current: CategoryDep, session: SessionDep): 
-    q = session.exec(select(Task).where(Task.category_id == categor_current.id))
+    q = session.exec(select(Task).where(Task.category_id == categor_current.id)).first()
     if q:
         raise HTTPException(status_code=409, detail="You have task by this category")
     session.delete(categor_current)
     session.commit()
     return
+
+# Сессии---------------------------------------
+@app.post("/sessions", response_model=SesAnswer, status_code=201)
+def create_ses(session: SessionDep, ses: SesCreate):
+    db_ses = PomodoroSession.model_validate(ses) # создаёт объект модели из данных, попутно проверяя их
+    session.add(db_ses)
+    session.commit()
+    session.refresh(db_ses)
+    return db_ses
+
+@app.get("/sessions", response_model=list[SesAnswer])
+def get_list_sessions(filters: Annotated[SesFilters, Query()], session: SessionDep):
+    query = select(PomodoroSession)
+    if filters.type is not None:
+        query = query.where(filters.type == PomodoroSession.type)
+    if filters.task_id is not None:
+        query = query.where(filters.task_id == PomodoroSession.task_id)
+    if filters.date_from is not None:
+        query = query.where(filters.date_from.combine(timezone.utc) <= PomodoroSession.started_at)    
+    if filters.date_to is not None:
+        query = query.where(filters.date_to.combine(timezone.utc) + timedelta(days=1) > PomodoroSession.started_at)
+    res = session.exec(query.order_by(PomodoroSession.started_at.desc()).offset(filters.skip).limit(filters.limit)).all()    
+    return res
+
+@app.get("/tasks/{task_id}/sessions", response_model=SesAnswer)
+def get_session_task(session: SessionDep, task_id: TaskDep):
+    result = session.exec(select(PomodoroSession).where(PomodoroSession.task_id == task_id)).all()
+    return result
+
+@app.delete("/sessions/{session_id}", status_code=204)
+def delete_session(session: SessionDep, session_id: Annotated[int, Path(gt=0)]):
+    res = session.get(PomodoroSession, session_id)
+    if res:
+        session.delete(res)
+        session.commit()
+        return
+    raise HTTPException(status_code=404, detail="Session not found")
+    
+
+    
+
