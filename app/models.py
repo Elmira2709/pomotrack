@@ -17,7 +17,7 @@ class CategoryPublic(CategoryBase):
 class CategoryCreate(CategoryBase):
     pass    
       
-# БД---------------------
+
 
 class TaskBase(SQLModel):
     title: str = Field(index=True, unique=True, min_length=1, max_length=100) # описывает атрибут класса-модели (наследника SQLModel).
@@ -27,7 +27,7 @@ class TaskBase(SQLModel):
 class Task(TaskBase, table=True):
     id: int | None = Field(default=None, primary_key=True)
     category_id: int | None = Field(default=None, gt=0, foreign_key="category.id")
-    created_at: NaiveDatetime = Field(default_factory=lambda: datetime.now()) # вызывает её при каждом создании задачи, 
+    created_at: NaiveDatetime = Field(default_factory=lambda: datetime.now(timezone.utc)) # вызывает её при каждом создании задачи, 
     # и каждый раз получается новое время
     description: str | None = Field(default=None, max_length=500)
 
@@ -103,4 +103,32 @@ class SesFilters(BaseModel):
     skip: Annotated[int, Query(ge=0)] = 0 
     limit: Annotated[int, Query(ge=1, le=100)] = 10
 
+class StatsAnswer(BaseModel):
+    num_work_session: int 
+    summ_min: int
+    num_done_tasks: int
+
+class StatsCategory(BaseModel):
+    name: str
+    time: float
+
+class User(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(unique=True)    
+    hash_password: str
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+class UserIn(BaseModel):
+    username: str = Field(min_length=2)
+    password: str = Field(min_length=8)
+
+class UserOut(BaseModel):
+    id: int
+    username: str
+    is_active: bool
+
+class Token(SQLModel):
+    access_token: str
+    token_type: str
 
