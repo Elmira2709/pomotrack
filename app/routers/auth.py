@@ -3,7 +3,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi import APIRouter, Query, status, HTTPException, Depends
 from typing import Annotated
 from sqlmodel import select
-from ..models import User, UserIn, UserOut, Token
+from ..models import User, UserIn, UserOut, Token, UserSettings
 from ..database import SessionDep
 from ..security import get_password_hash, authenticate_user, create_access_token
 from ..config import get_settings
@@ -16,10 +16,12 @@ def register(session: SessionDep, user: UserIn):
     if session.exec(select(User).where(User.username == user.username)).first():
         raise HTTPException(status_code=409, detail="Username already registered")
     hashed = get_password_hash(user.password)
-    db_auth = User.model_validate(user, update={"hash_password": hashed}) # перекладывает уже проверенные данные из одной модели в другую
-    session.add(db_auth)  # запомни - надо бдет сохранить объект
-    session.commit() # уже записывает
-    session.refresh(db_auth) # перечитывает
+    db_auth = User.model_validate(user, update={"hash_password": hashed})
+    session.add(db_auth)
+    session.flush() 
+    session.add(UserSettings(user_id=db_auth.id))
+    session.commit()
+    session.refresh(db_auth)
     return db_auth
 
 @router.post("/token", response_model=Token)    

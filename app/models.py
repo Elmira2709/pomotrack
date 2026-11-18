@@ -1,15 +1,18 @@
 from pydantic import BaseModel, NaiveDatetime, computed_field, model_validator, AwareDatetime
 from sqlmodel import SQLModel, Field
+from sqlalchemy import UniqueConstraint
 from typing import Annotated
 from enum import Enum
 from fastapi import Query
 from datetime import datetime, timezone, date
 
 class CategoryBase(SQLModel):
-    name: str = Field(index=True, unique=True, min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=50)
 
 class Category(CategoryBase, table=True):
-    id: int | None = Field(default=None, primary_key=True) # None означает ещё не присвоен
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id")
+    __table_args__ = (UniqueConstraint("user_id", "name"),)
 
 class CategoryPublic(CategoryBase):
     id: int
@@ -20,16 +23,16 @@ class CategoryCreate(CategoryBase):
 
 
 class TaskBase(SQLModel):
-    title: str = Field(index=True, unique=True, min_length=1, max_length=100) # описывает атрибут класса-модели (наследника SQLModel).
+    title: str = Field(min_length=1, max_length=100)
     done: bool | None = None 
     category_id: int | None = Field(default=None, gt=0)
 
 class Task(TaskBase, table=True):
     id: int | None = Field(default=None, primary_key=True)
     category_id: int | None = Field(default=None, gt=0, foreign_key="category.id")
-    created_at: NaiveDatetime = Field(default_factory=lambda: datetime.now(timezone.utc)) # вызывает её при каждом создании задачи, 
-    # и каждый раз получается новое время
+    created_at: NaiveDatetime = Field(default_factory=lambda: datetime.now(timezone.utc))  
     description: str | None = Field(default=None, max_length=500)
+    user_id: int = Field(foreign_key="user.id")
 
 class TaskCreate(TaskBase):
     pass
@@ -63,6 +66,7 @@ class PomodoroSession(SQLModel, table=True):
     started_at: AwareDatetime
     ended_at: AwareDatetime
     task_id: int | None = Field(default=None, gt=0, foreign_key="task.id")
+    user_id: int = Field(foreign_key="user.id")
 
     @computed_field
     @property
@@ -132,3 +136,21 @@ class Token(SQLModel):
     access_token: str
     token_type: str
 
+class SettingsBase(SQLModel):
+    work_minutes: int = Field(default=25, ge=1, le=120)
+    short_break_minutes: int = Field(default=5, ge=1, le=60)
+    long_break_minutes: int = Field(default=15, ge=1, le=120)
+    sessions_before_long_break: int = Field(default=4, ge=1, le=10)
+
+class UserSettings(SettingsBase, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", unique=True)
+
+class SettingsPublic(SettingsBase):
+    pass
+
+class SettingsUpdate(SQLModel):
+    work_minutes: int | None = Field(default=None, ge=1, le=120)
+    short_break_minutes: int | None = Field(default=None, ge=1, le=60)
+    long_break_minutes: int | None = Field(default=None, ge=1, le=120)
+    sessions_before_long_break: int | None = Field(default=None, ge=1, le=10)
